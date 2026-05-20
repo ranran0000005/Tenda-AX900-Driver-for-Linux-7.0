@@ -12,8 +12,9 @@
 |------|------|---------|------|
 | 腾达 (Tenda) | AX900 | AIC8800D80 / AIC8800DC | USB |
 
-- USB VID: `0xA69C` / `0x368B`
-- USB PID: `0x8800`, `0x88DC`, `0x88DD`, `0x8D81` 等
+- USB VID: `0xA69C` / `0x368B` / `0x2604`
+- USB PID: `0x8800`, `0x88DC`, `0x88DD`, `0x8D80`, `0x8D81`, `0x001F` 等
+  - `0x5723` 为 ZeroCD U盘模式（插入后自动切换为 WiFi 模式）
 - 支持 Wi-Fi 6 (802.11ax)、2.4GHz/5GHz 双频、WPA3
 
 ---
@@ -59,71 +60,132 @@
 
 ---
 
-## 📦 编译与安装
+## 📦 安装指南
 
-### 依赖
+### 前提条件
 
 ```bash
 sudo apt update
-sudo apt install build-essential linux-headers-$(uname -r) git
+sudo apt install build-essential linux-headers-$(uname -r) git openssl mokutil
 ```
 
-### 编译
+> **Secure Boot 用户**：若系统启用了 Secure Boot，内核会拒绝加载未签名模块。安装前请先生成并注册 MOK 密钥（见下方 [Secure Boot 签名](#secure-boot-签名)）。
+
+---
+
+### 方式一：自动安装（推荐）
+
+项目根目录提供了 `install.sh` 一键脚本，自动完成编译、签名、固件安装、模块安装和开机配置：
 
 ```bash
-cd drivers/aic8800
-make clean
-make -j$(nproc)
+cd /path/to/aic8800_linux_drvier
+./install.sh
 ```
 
-编译成功后会生成两个内核模块：
+脚本执行流程：
+1. 编译 `aic_load_fw.ko` 和 `aic8800_fdrv.ko`
+2. 用现有 MOK 密钥签名（若存在 `MOK.priv` / `MOK.der`）
+3. 复制固件到 `/lib/firmware/aic8800D80/` 和 `/lib/firmware/aic8800DC/`
+4. 安装 udev 规则到 `/etc/udev/rules.d/`
+5. 安装内核模块到 `/lib/modules/` 并执行 `depmod -a`
+6. 创建 `/etc/modules-load.d/aic8800.conf` 实现开机自动加载
+
+脚本完成后，加载驱动并插入网卡即可：
+
+```bash
+sudo modprobe aic_load_fw
+sudo modprobe aic8800_fdrv
+ip link show  # 查看是否出现 wlxxx 接口
+```
+
+---
+
+### 方式二：手动安装（了解细节）
+
+#### 1. 编译
+
+```bash
+cd drivers/aic8800/aic_load_fw
+make clean && make -j$(nproc)
+cd ../aic8800_fdrv
+make clean && make -j$(nproc)
+```
+
+编译产物：
 - `aic_load_fw/aic_load_fw.ko` — 固件加载器
 - `aic8800_fdrv/aic8800_fdrv.ko` — 无线网卡驱动
 
-### 安装
+#### 2. Secure Boot 签名
+
+仅 Secure Boot 启用时需要。首次使用需生成并注册 MOK 密钥：
 
 ```bash
-cd drivers/aic8800
-sudo make install
+# 生成密钥（仅需一次）
+openssl req -new -x509 -newkey rsa:2048 -keyout MOK.priv -outform DER -out MOK.der \
+    -nodes -days 36500 -subj "/CN=AIC8800 Driver/"
+
+# 注册到系统（设置密码，重启后按提示完成注册）
+sudo mokutil --import MOK.der
+```
+
+每次编译后签名：
+
+```bash
+SIGN="/usr/src/linux-headers-$(uname -r)/scripts/sign-file"
+sudo $SIGN sha256 MOK.priv MOK.der drivers/aic8800/aic_load_fw/aic_load_fw.ko
+sudo $SIGN sha256 MOK.priv MOK.der drivers/aic8800/aic8800_fdrv/aic8800_fdrv.ko
+```
+
+#### 3. 安装固件与规则
+
+```bash
+# 固件（驱动运行必需）
+sudo mkdir -p /lib/firmware/aic8800D80 /lib/firmware/aic8800DC
+sudo cp fw/aic8800D80/* /lib/firmware/aic8800D80/
+sudo cp fw/aic8800DC/* /lib/firmware/aic8800DC/
+
+# udev 规则（ZeroCD 模式自动切换）
+sudo cp tools/aic.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+```
+
+> ⚠️ **固件必须预先安装**。若缺失，`aic_load_fw` probe 会失败：
+> ```
+> aic_load_firmware: fmacfw_8800d80_u02.bin file failed to open
+> ```
+
+#### 4. 安装内核模块
+
+```bash
+sudo mkdir -p /lib/modules/$(uname -r)/kernel/drivers/net/wireless/aic8800
+sudo cp drivers/aic8800/aic_load_fw/aic_load_fw.ko \
+     /lib/modules/$(uname -r)/kernel/drivers/net/wireless/aic8800/
+sudo cp drivers/aic8800/aic8800_fdrv/aic8800_fdrv.ko \
+     /lib/modules/$(uname -r)/kernel/drivers/net/wireless/aic8800/
 sudo depmod -a
 ```
 
-### 加载驱动
+#### 5. 配置开机自动加载（可选）
 
 ```bash
-# 复制固件和 udev 规则
-sudo bash install_setup.sh
+printf "aic_load_fw\naic8800_fdrv\n" | sudo tee /etc/modules-load.d/aic8800.conf
+```
 
-# 加载内核模块
+#### 6. 加载驱动
+
+```bash
 sudo modprobe aic_load_fw
 sudo modprobe aic8800_fdrv
-
-# 查看网卡是否识别
-ip link show
-# 或
-iw dev
 ```
 
-**加载时的日志示例（正常，无需插入网卡）：**
-
-```
-aic_load_fw: loading out-of-tree module taints kernel.
-aic_load_fw: module verification failed: signature and/or required key missing - tainting kernel
-aic_bluetooth_mod_init
-AICWFDBG(LOGINFO)	aicwf_prealloc_init enter
-usbcore: registered new interface driver aic_load_fw
-AICWFDBG(LOGINFO)	rwnx v6.4.3.0 - 1a4b0054d2M (master)
-usbcore: registered new interface driver aic8800_fdrv
-```
-
-> - `taints kernel` / `module verification failed`：**正常现象**。本驱动是外部模块（out-of-tree），未进行内核签名，不影响功能。
-> - 驱动加载后即注册 USB 接口监听，**无需插入网卡**也会显示上述初始化日志。插入网卡后会自动识别并加载固件。
+加载成功后插入网卡，系统会自动识别并初始化。
 
 ### 卸载
 
 ```bash
 sudo rmmod aic8800_fdrv
 sudo rmmod aic_load_fw
+sudo rm -f /etc/modules-load.d/aic8800.conf
 sudo bash uninstall_setup.sh
 ```
 
@@ -169,7 +231,7 @@ echo 63 | sudo tee /sys/module/aic8800_fdrv/parameters/aicwf_dbg_level  # 全开
    - 若您的设备为 SDIO 接口版本，需修改 `Makefile` 中对应开关后重新编译。
 
 4. **Secure Boot**
-   - 若系统启用了 Secure Boot，需先禁用或自行对驱动模块签名，否则内核拒绝加载未签名模块。
+   - 若系统启用了 Secure Boot，必须对模块签名并注册 MOK 密钥，否则内核拒绝加载。详见上方 [Secure Boot 签名](#secure-boot-签名) 章节。
 
 5. **调试信息**
    - 驱动默认输出较多调试日志。如需要减少日志，可修改 `Makefile` 中日志级别相关配置后重新编译。
@@ -210,6 +272,18 @@ sudo make install
 
 ---
 
+## 🔍 常见问题排查
+
+| 现象 | 排查步骤 |
+|------|---------|
+| `fmacfw_8800d80_u02.bin file failed to open` | 运行 `sudo bash install_setup.sh` 安装固件到 `/lib/firmware/` |
+| `failed with errno 0` (aic_load_fw) | 通常是固件缺失导致，先检查 `/lib/firmware/aic8800D80/` 是否存在 `.bin` 文件 |
+| `Unknown symbol aicwf_prealloc_*` (aic8800_fdrv) | `aic_load_fw` 必须先于 `aic8800_fdrv` 加载，模块依赖关系：`aic8800_fdrv` → `aic_load_fw` |
+| `Key was rejected by service` | Secure Boot 启用但模块未签名，参考上方 Secure Boot 章节 |
+| 网卡插入后显示为 U盘 (`0x5723`) | 检查 udev 规则：`cat /etc/udev/rules.d/aic.rules`，运行 `sudo udevadm control --reload` |
+| 网卡接口出现但无法扫描 | 检查 `dmesg` 中是否有固件上传成功日志：`Upload fmacfw_*.bin firmware` |
+
+
 ## 📝 修改文件清单
 
 ```
@@ -220,6 +294,8 @@ drivers/aic8800/aic8800_fdrv/rwnx_main.c            (cfg80211 回调签名)
 drivers/aic8800/aic8800_fdrv/aic_vendor.c           (strcpy → strscpy)
 drivers/aic8800/aic8800_fdrv/aicwf_compat_8800d80.c  (sprintf 重叠修复)
 drivers/aic8800/aic8800_fdrv/aicwf_compat_8800d80x2.c (sprintf 重叠修复)
+drivers/aic8800/aic8800_fdrv/Makefile                 (VERSION 检查 + KBUILD_EXTRA_SYMBOLS)
+install.sh                                            (一键安装脚本)
 ```
 
 ---

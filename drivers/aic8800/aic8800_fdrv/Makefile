@@ -58,6 +58,8 @@ CONFIG_RWNX_AMSDUS_TX ?= n
 CONFIG_RWNX_BFMER ?= n
 
 CONFIG_SDIO_SUPPORT =n
+KBUILD_EXTRA_SYMBOLS += $(PWD)/../aic_load_fw/Module.symvers
+
 CONFIG_USB_SUPPORT =y
 CONFIG_RX_REORDER =y
 CONFIG_ARP_OFFLOAD =y
@@ -290,8 +292,10 @@ ccflags-y += -DNX_TXQ_CNT=4
 endif
 
 # For old kernel (<=3.19)
-ifeq ($(shell test $(VERSION) -lt 4 -a "$(CONFIG_VENDOR_RWNX)" = y ; echo $$?),0)
+ifneq ($(VERSION),)
+ifeq ($(shell test "$(VERSION)" -lt 4 -a "$(CONFIG_VENDOR_RWNX)" = y ; echo $$?),0)
 ccflags-y += -DCONFIG_VENDOR_RWNX_VHT_NO80
+endif
 endif
 
 ccflags-$(CONFIG_RX_REORDER) += -DAICWF_RX_REORDER
