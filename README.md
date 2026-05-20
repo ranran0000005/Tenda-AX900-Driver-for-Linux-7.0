@@ -115,26 +115,88 @@ make clean && make -j$(nproc)
 - `aic_load_fw/aic_load_fw.ko` — 固件加载器
 - `aic8800_fdrv/aic8800_fdrv.ko` — 无线网卡驱动
 
-#### 2. Secure Boot 签名
+#### 2. Secure Boot 签名（MOK）
 
-仅 Secure Boot 启用时需要。首次使用需生成并注册 MOK 密钥：
+仅 Secure Boot 启用时需要。本驱动为 out-of-tree 内核模块，未签名时会被内核拒绝加载，错误信息为：
+
+```
+modprobe: ERROR: could not insert module xxx.ko: Key was rejected by service
+```
+
+**什么是 MOK**：MOK（Machine Owner Key）是用户自己生成的安全密钥，通过 UEFI 固件注册后，内核会信任该密钥签名的模块，无需关闭 Secure Boot。
+
+**Step 1 — 检查 Secure Boot 状态**
 
 ```bash
-# 生成密钥（仅需一次）
+mokutil --sb-state
+# SecureBoot enabled  → 需要签名
+# SecureBoot disabled → 跳过本节
+```
+
+**Step 2 — 生成 MOK 密钥对（仅需一次）**
+
+在项目根目录执行：
+
+```bash
 openssl req -new -x509 -newkey rsa:2048 -keyout MOK.priv -outform DER -out MOK.der \
     -nodes -days 36500 -subj "/CN=AIC8800 Driver/"
+```
 
-# 注册到系统（设置密码，重启后按提示完成注册）
+生成后会得到两个文件：
+- `MOK.priv` — 私钥，用于签名模块（**妥善保管，不要上传**）
+- `MOK.der`  — 公钥，用于注册到 UEFI
+
+**Step 3 — 注册公钥到系统**
+
+```bash
 sudo mokutil --import MOK.der
 ```
 
-每次编译后签名：
+执行后会要求设置一个临时密码（建议简单如 `12345678`），重启后 UEFI  enroll 界面需要用到。
+
+**Step 4 — 重启并完成 UEFI Enroll**
+
+```bash
+sudo reboot
+```
+
+重启后会进入蓝色 UEFI MOK Management 界面：
+
+1. 选择 `Enroll MOK`（或 `Continue` → `Enroll MOK`）
+2. 选择 `View key 0` 确认密钥信息（可选）
+3. 选择 `Continue`
+4. 输入 Step 3 设置的临时密码
+5. 选择 `Reboot`
+
+> ⚠️ 注意：不同主板厂商的 UEFI 界面文字可能略有不同，但流程一致（Enroll → 输入密码 → Reboot）。
+
+**Step 5 — 验证 MOK 是否注册成功**
+
+重启后执行：
+
+```bash
+mokutil --list-enrolled | grep -A 2 "AIC8800"
+# 能看到 "CN=AIC8800 Driver" 即表示注册成功
+```
+
+**Step 6 — 签名模块**
+
+每次重新编译后，用私钥签名 `.ko` 文件：
 
 ```bash
 SIGN="/usr/src/linux-headers-$(uname -r)/scripts/sign-file"
 sudo $SIGN sha256 MOK.priv MOK.der drivers/aic8800/aic_load_fw/aic_load_fw.ko
 sudo $SIGN sha256 MOK.priv MOK.der drivers/aic8800/aic8800_fdrv/aic8800_fdrv.ko
 ```
+
+验证签名：
+
+```bash
+modinfo drivers/aic8800/aic_load_fw/aic_load_fw.ko | grep signer
+# 输出：signer:         AIC8800 Driver
+```
+
+**签名自动化**：`install.sh` 脚本会自动检测 `MOK.priv` / `MOK.der` 并签名，无需手动执行 Step 6。
 
 #### 3. 安装固件与规则
 
